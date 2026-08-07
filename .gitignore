@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+.swiftpm/
+dist/
+Recordings/
+*.mp4
+xcuserdata/
+DerivedData/
+.dotnet-home/
+**/bin/
+**/obj/
+publish/
+*.wav

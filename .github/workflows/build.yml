@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build macOS app
+        run: ./scripts/build-app.sh
+      - name: Package macOS app
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/NRadio 直播录音.app" NRadioRecorder-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NRadioRecorder-macOS
+          path: NRadioRecorder-macOS.zip
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Publish self-contained Windows app
+        run: dotnet publish Windows/NRadioRecorder.Windows/NRadioRecorder.Windows.csproj -c Release -r win-x64 --self-contained true -o publish/windows
+      - name: Package Windows app
+        shell: pwsh
+        run: Compress-Archive -Path publish/windows/* -DestinationPath NRadioRecorder-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NRadioRecorder-Windows-x64
+          path: NRadioRecorder-Windows-x64.zip

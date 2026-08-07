@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>NRadio 直播录音</string>
+    <key>CFBundleExecutable</key>
+    <string>NRadioRecorder</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.nradio.live-recorder</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>NRadioRecorder</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>用于录制您主动选择的软件所播放的系统音频，不会使用麦克风。</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>用于识别并捕获您主动选择的软件音频，不会保存屏幕画面。</string>
+</dict>
+</plist>
