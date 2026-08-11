@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "NRadioRecorder",
             path: "Sources/NRadioRecorder"
+        ),
+        .testTarget(
+            name: "NRadioRecorderTests",
+            dependencies: ["NRadioRecorder"],
+            path: "Tests/NRadioRecorderTests"
         )
     ]
 )

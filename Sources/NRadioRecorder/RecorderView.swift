@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RecorderView: View {
-    @StateObject private var model = RecorderViewModel()
+    @ObservedObject var model: RecorderViewModel
 
     var body: some View {
         ZStack {

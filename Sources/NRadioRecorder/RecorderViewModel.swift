@@ -12,6 +12,8 @@ struct ApplicationSource: Identifiable {
 
 @MainActor
 final class RecorderViewModel: ObservableObject {
+    static let shared = RecorderViewModel()
+
     @Published var applications: [ApplicationSource] = []
     @Published var selectedApplicationID: String = ""
     @Published var outputDirectory: URL
@@ -104,6 +106,12 @@ final class RecorderViewModel: ObservableObject {
         } else {
             await startRecording()
         }
+    }
+
+    func prepareForTermination() async {
+        guard isRecording else { return }
+        status = "正在安全结束录音后退出…"
+        await stopRecording()
     }
 
     func revealLastRecording() {

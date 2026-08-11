@@ -11,6 +11,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Test macOS recorder
+        run: swift test --disable-sandbox
       - name: Build macOS app
         run: ./scripts/build-app.sh
       - name: Package macOS app
