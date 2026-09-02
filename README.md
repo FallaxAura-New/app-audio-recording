@@ -8,6 +8,8 @@
 - 只捕获该软件及其子进程播放的系统音频
 - 不访问麦克风，不生成视频轨道
 - 自由选择保存目录，文件名自动带日期时间
+- macOS 每 10 秒写入一个可恢复的 MP4 片段，异常退出不会再损坏整场录音
+- macOS 正常退出时会先停止并封口当前录音
 - macOS 使用 Apple ScreenCaptureKit
 - Windows 使用 WASAPI Process Loopback 和 Media Foundation
 - GitHub Actions 自动构建两端安装包
@@ -41,6 +43,8 @@ open "dist/NRadio 直播录音.app"
 ```
 
 首次打开时，macOS 会请求“屏幕与系统音频录制”权限。虽然系统权限名称包含“屏幕”，本程序只注册音频输出，不会保存画面。
+
+macOS 版使用 fragmented MP4，每 10 秒把可播放的片段索引写入文件。即使程序崩溃、被强制关闭或电脑意外断电，已经落盘的片段仍可播放，通常最多损失最后约 10 秒；正常点击“停止并保存”或正常退出应用时，程序仍会完成标准封口。
 
 ## Windows 本地构建
 

@@ -69,6 +69,7 @@ final class ApplicationAudioRecorder: NSObject, @unchecked Sendable {
         configuration.queueDepth = 3
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        CrashResilientMP4.configure(writer)
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 48_000,
