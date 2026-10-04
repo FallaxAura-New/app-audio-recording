@@ -37,11 +37,12 @@ internal sealed class MainForm : Form
 
         BuildInterface();
         Load += (_, _) => RefreshSources();
-        recordingService.Failed += error =>
+        recordingService.Failed += _ =>
         {
             if (!IsDisposed && IsHandleCreated) BeginInvoke(async () =>
             {
-                if (recordingService.IsRecording && !busy) await StopRecordingAsync();
+                if (recordingService.IsRecording && recordingService.HasFailure && !busy)
+                    await StopRecordingAsync();
             });
         };
         FormClosing += OnFormClosing;
@@ -248,6 +249,7 @@ internal sealed class MainForm : Form
 
     private async Task ToggleRecordingAsync()
     {
+        if (busy) return;
         if (recordingService.IsRecording)
         {
             await StopRecordingAsync();
@@ -305,6 +307,7 @@ internal sealed class MainForm : Form
             await recordingService.StartAsync(process is null ? null : (uint)process.Id, microphone?.Id, lastRecordingPath, format);
 
             startedAt = DateTimeOffset.Now;
+            timerLabel.Text = "00:00:00";
             elapsedTimer.Start();
             stateLabel.Text = "正在录制";
             recordButton.Text = "停止并保存";
@@ -320,11 +323,13 @@ internal sealed class MainForm : Form
         finally
         {
             SetBusy(false);
+            if (recordingService.IsRecording && recordingService.HasFailure) await StopRecordingAsync();
         }
     }
 
     private async Task StopRecordingAsync()
     {
+        if (busy || !recordingService.IsRecording) return;
         elapsedTimer.Stop();
         SetBusy(true);
         statusLabel.Text = formatPicker.SelectedIndex == 1 ? "正在编码并保存 MP3，请稍候…" : "正在保存 WAV…";
@@ -396,6 +401,12 @@ internal sealed class MainForm : Form
 
     private async void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        // Do not dispose this form while a start or save continuation is pending.
+        if (busy)
+        {
+            e.Cancel = true;
+            return;
+        }
         if (!recordingService.IsRecording) return;
 
         e.Cancel = true;

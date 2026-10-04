@@ -7,6 +7,16 @@ static void Check(bool condition, string message)
     if (!condition) throw new Exception(message);
 }
 
+static byte[] ReadRecordingSnapshot(string path)
+{
+    // Windows checks sharing in both directions. This reader must permit the
+    // writer's existing write access; the writer still denies other writers.
+    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+    var bytes = new byte[checked((int)stream.Length)];
+    stream.ReadExactly(bytes);
+    return bytes;
+}
+
 var mixed = new AudioMixer(2);
 mixed.Add(new float[] { .6f, -.6f }, AudioSource.Application, 0);
 mixed.Add(new float[] { .4f, -.4f }, AudioSource.Microphone, 0);
@@ -36,13 +46,14 @@ try
     using (var writer = new WavePcmWriter(path))
     {
         writer.Append(Enumerable.Repeat(.25f, 96_000).ToArray());
-        var bytes = File.ReadAllBytes(path);
+        var bytes = ReadRecordingSnapshot(path);
         Check(bytes.Length == 192_080 && BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(76)) == 192_000,
             "Checkpoint must expose one complete second of audio.");
         try { using var duplicate = new WavePcmWriter(path); throw new Exception("Existing file overwritten."); }
         catch (IOException) { }
-        Check(File.ReadAllBytes(path).SequenceEqual(bytes), "Collision changed existing recording.");
+        Check(ReadRecordingSnapshot(path).SequenceEqual(bytes), "Collision changed existing recording.");
     }
+    Check(File.ReadAllBytes(path).Length == 192_080, "Finished recording is incomplete.");
 }
 finally { File.Delete(path); }
 

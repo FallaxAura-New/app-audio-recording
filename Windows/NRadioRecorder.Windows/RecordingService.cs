@@ -25,21 +25,27 @@ internal sealed class RecordingService : IAsyncDisposable
     private Exception? terminalError;
 
     public event Action<Exception>? Failed;
-    public bool IsRecording => writer is not null;
+    public bool IsRecording { get { lock (audioLock) return writer is not null; } }
+    public bool HasFailure { get { lock (audioLock) return terminalError is not null; } }
     public string? RecoverablePath { get; private set; }
 
     public async Task StartAsync(uint? processId, string? microphoneId, string targetOutputPath, RecordingFormat outputFormat)
     {
         if (IsRecording) throw new InvalidOperationException("已经有一项录音正在进行。");
         if (processId is null && microphoneId is null) throw new InvalidOperationException("请至少开启一个音频源。");
+        if (processId is not null && !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 20348))
+            throw new NotSupportedException("录制指定 App 需要 Windows build 20348 或更高版本（建议 Windows 11）；仍可关闭 App 音频，仅录麦克风。");
         if (File.Exists(targetOutputPath)) throw new IOException("输出文件已存在，请更换文件名。");
         Directory.CreateDirectory(Path.GetDirectoryName(targetOutputPath)!);
         format = outputFormat;
         outputPath = targetOutputPath;
         wavePath = format == RecordingFormat.Wav ? targetOutputPath : targetOutputPath + ".recording.wav";
         RecoverablePath = null;
-        stopping = false;
-        terminalError = null;
+        lock (audioLock)
+        {
+            stopping = false;
+            terminalError = null;
+        }
 
         try
         {
@@ -58,20 +64,24 @@ internal sealed class RecordingService : IAsyncDisposable
                     .WithFormat(WaveFormat.CreateIeeeFloatWaveFormat(AudioMixer.SampleRate, 2)).BuildAsync();
                 Attach(recorder, AudioSource.Microphone);
             }
-            writer = new WavePcmWriter(wavePath);
-            RecoverablePath = wavePath;
-            mixer = new AudioMixer(captures.Count);
-            startTimestamp = Stopwatch.GetTimestamp();
-            accepting = true;
+            lock (audioLock)
+            {
+                writer = new WavePcmWriter(wavePath);
+                RecoverablePath = wavePath;
+                mixer = new AudioMixer(captures.Count);
+                startTimestamp = Stopwatch.GetTimestamp();
+                accepting = true;
+            }
             pumpCancellation = new CancellationTokenSource();
             pumpTask = PumpAsync(pumpCancellation.Token);
             foreach (var capture in captures) capture.Recorder.StartRecording();
-            if (terminalError is not null) throw terminalError;
+            lock (audioLock) if (terminalError is not null) throw terminalError;
         }
-        catch
+        catch (Exception startupError)
         {
-            await CleanupAsync();
-            // Keep any file created by this attempt. Never delete a pre-existing file.
+            try { await CleanupAsync(); }
+            catch (Exception cleanupError) { throw new AggregateException(startupError, cleanupError); }
+            // Preserve recordings and the original failure even if cleanup failed.
             throw;
         }
     }
@@ -154,8 +164,12 @@ internal sealed class RecordingService : IAsyncDisposable
             (double)Stopwatch.Frequency * AudioMixer.SampleRate);
         var finalPath = outputPath;
         var sourcePath = wavePath;
-        stopping = true;
-        Exception? failure = terminalError;
+        Exception? failure;
+        lock (audioLock)
+        {
+            stopping = true;
+            failure = terminalError;
+        }
         try
         {
             foreach (var capture in captures)
@@ -187,47 +201,71 @@ internal sealed class RecordingService : IAsyncDisposable
                     MediaFoundationEncoder.EncodeToMp3(reader, destination, 192_000);
                     destination.Flush(flushToDisk: true);
                 });
-                File.Delete(sourcePath);
+                // MP3 is complete at this point. A locked recovery file should
+                // not turn a successful recording into a reported save failure.
+                try { File.Delete(sourcePath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
             RecoverablePath = finalPath;
-            return finalPath;
         }
-        catch (Exception ex)
+        catch (Exception ex) { failure = ex; }
+        try { await CleanupAsync(); }
+        catch (Exception ex) { failure ??= ex; }
+        if (failure is not null)
         {
-            throw new InvalidOperationException($"录音未完成保存：{ex.Message}。可恢复的 WAV 已保留在：{sourcePath}", ex);
+            var preserved = RecoverablePath is not null && File.Exists(RecoverablePath)
+                ? $"已写入的文件保留在：{RecoverablePath}"
+                : "请检查所选保存目录";
+            throw new InvalidOperationException($"录音停止或保存时出现问题：{failure.Message}。{preserved}", failure);
         }
-        finally { await CleanupAsync(); }
+        return finalPath;
     }
 
     private async Task CleanupAsync()
     {
-        stopping = true;
+        lock (audioLock)
+        {
+            stopping = true;
+            accepting = false;
+        }
+        var errors = new List<Exception>();
         pumpCancellation?.Cancel();
-        if (pumpTask is not null) await pumpTask;
+        if (pumpTask is not null)
+        {
+            try { await pumpTask; }
+            catch (Exception ex) { errors.Add(ex); }
+        }
         pumpCancellation?.Dispose();
         pumpCancellation = null;
         pumpTask = null;
-        lock (audioLock) accepting = false;
-        foreach (var capture in captures)
+        var previousCaptures = captures.ToArray();
+        captures.Clear();
+        foreach (var capture in previousCaptures)
         {
             capture.Recorder.DataAvailable -= capture.Handler;
             capture.Recorder.RecordingStopped -= capture.StoppedHandler;
-            await capture.Recorder.DisposeAsync();
+            try { await capture.Recorder.DisposeAsync(); }
+            catch (Exception ex) { errors.Add(ex); }
         }
-        captures.Clear();
-        microphoneDevice?.Dispose();
+        try { microphoneDevice?.Dispose(); }
+        catch (Exception ex) { errors.Add(ex); }
         microphoneDevice = null;
+        WavePcmWriter? previousWriter;
         lock (audioLock)
         {
-            writer?.Dispose();
+            previousWriter = writer;
             writer = null;
             mixer = null;
         }
+        try { previousWriter?.Dispose(); }
+        catch (Exception ex) { errors.Add(ex); }
         wavePath = outputPath = null;
+        if (errors.Count > 0) throw new AggregateException("录音资源清理失败。", errors);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (IsRecording) { try { await StopAsync(); } catch { await CleanupAsync(); } }
+        if (IsRecording) await StopAsync();
     }
 }

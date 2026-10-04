@@ -17,7 +17,13 @@ enum RecorderError: LocalizedError {
     }
 }
 
-final class ApplicationAudioRecorder: NSObject, @unchecked Sendable {
+protocol AudioRecording: AnyObject, Sendable {
+    var onFailure: (@Sendable (Error) -> Void)? { get set }
+    func start(application: SCRunningApplication?, microphone: AVCaptureDevice?, outputURL: URL, format: RecordingFormat) async throws
+    func stop() async throws
+}
+
+final class ApplicationAudioRecorder: NSObject, AudioRecording, @unchecked Sendable {
     var onFailure: (@Sendable (Error) -> Void)?
     private let audioQueue = DispatchQueue(label: "com.nradio.recorder.audio", qos: .userInitiated)
     private let microphoneQueue = DispatchQueue(label: "com.nradio.recorder.microphone", qos: .userInitiated)

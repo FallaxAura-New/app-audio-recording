@@ -36,12 +36,14 @@ final class RecorderViewModel: ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var lastRecordingURL: URL?
 
-    private let recorder = ApplicationAudioRecorder()
+    private let recorder: any AudioRecording
     private var timer: Timer?
     private var startedAt: Date?
     private var captureFailure: Error?
+    private var stopTask: Task<Void, Never>?
 
-    init() {
+    init(recorder: any AudioRecording = ApplicationAudioRecorder()) {
+        self.recorder = recorder
         outputFormat = RecordingFormat(rawValue: UserDefaults.standard.string(forKey: "outputFormat") ?? "") ?? .wav
         if let path = UserDefaults.standard.string(forKey: "outputDirectory") {
             outputDirectory = URL(fileURLWithPath: path, isDirectory: true)
@@ -54,9 +56,8 @@ final class RecorderViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.captureFailure = error
-                if self.isRecording {
+                if self.isRecording && !self.isLoading {
                     await self.stopRecording()
-                    self.status = "音频源中断，已保存可用录音：\(error.localizedDescription)"
                 }
             }
         }
@@ -110,7 +111,7 @@ final class RecorderViewModel: ObservableObject {
     }
 
     func loadApplications() async {
-        guard !isRecording, applicationEnabled else { return }
+        guard !isRecording, !isLoading, applicationEnabled else { return }
         isLoading = true
         status = "正在读取可录音的软件…"
         defer { isLoading = false }
@@ -211,7 +212,17 @@ final class RecorderViewModel: ObservableObject {
     }
 
     private func stopRecording() async {
+        // A failure callback or Quit may arrive while a save is already running.
+        // Join that save instead of starting another one or terminating early.
+        if let stopTask { await stopTask.value; return }
         guard isRecording else { return }
+        let task = Task { @MainActor [self] in await finishRecording() }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    private func finishRecording() async {
         timer?.invalidate()
         timer = nil
         isLoading = true

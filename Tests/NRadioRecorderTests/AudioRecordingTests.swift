@@ -1,4 +1,5 @@
 import AVFoundation
+import ScreenCaptureKit
 import XCTest
 @testable import NRadioRecorder
 
@@ -143,5 +144,86 @@ final class AudioRecordingTests: XCTestCase {
         model.applicationEnabled = true
         model.selectedApplicationID = "not-running"
         XCTAssertFalse(model.canStart)
+    }
+
+    @MainActor
+    func testQuitWaitsForExistingSaveInsteadOfStoppingTwice() async {
+        let recorder = DeferredRecorder()
+        let model = RecorderViewModel(recorder: recorder)
+        model.isRecording = true
+        let saving = Task { await model.toggleRecording() }
+        await recorder.waitUntilStopping()
+        let quitting = Task { await model.prepareForTermination() }
+        await Task.yield()
+        XCTAssertTrue(model.isRecording)
+        recorder.completeStop()
+        await saving.value
+        await quitting.value
+        XCTAssertEqual(recorder.stopCount, 1)
+        XCTAssertFalse(model.isRecording)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(model.status, "录音已保存。")
+    }
+
+    @MainActor
+    func testCaptureFailureCannotOverwriteSaveErrorWithSuccess() async {
+        let recorder = DeferredRecorder()
+        let model = RecorderViewModel(recorder: recorder)
+        model.isRecording = true
+        let saving = Task { await model.toggleRecording() }
+        await recorder.waitUntilStopping()
+        recorder.onFailure?(NSError(domain: "RecordingTest", code: 1, userInfo: [NSLocalizedDescriptionKey: "音频源断开"]))
+        await Task.yield()
+        recorder.completeStop(error: NSError(domain: "RecordingTest", code: 2, userInfo: [NSLocalizedDescriptionKey: "磁盘已满"]))
+        await saving.value
+        await Task.yield()
+        XCTAssertEqual(recorder.stopCount, 1)
+        XCTAssertTrue(model.status.contains("磁盘已满"))
+        XCTAssertFalse(model.status.contains("已保存"))
+        XCTAssertFalse(model.isRecording)
+        XCTAssertFalse(model.isLoading)
+    }
+}
+
+/// Simulates a pending save without accessing microphone or screen permissions.
+private final class DeferredRecorder: AudioRecording, @unchecked Sendable {
+    var onFailure: (@Sendable (Error) -> Void)?
+    private let lock = NSLock()
+    private var savedContinuation: CheckedContinuation<Void, Error>?
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var stops = 0
+    var stopCount: Int { lock.lock(); defer { lock.unlock() }; return stops }
+
+    func start(application: SCRunningApplication?, microphone: AVCaptureDevice?, outputURL: URL, format: RecordingFormat) async throws {
+        XCTFail("This test must not start capture.")
+    }
+
+    func stop() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            stops += 1
+            savedContinuation = continuation
+            let waiting = startedContinuation
+            startedContinuation = nil
+            lock.unlock()
+            waiting?.resume()
+        }
+    }
+
+    func waitUntilStopping() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if stops > 0 { lock.unlock(); continuation.resume() }
+            else { startedContinuation = continuation; lock.unlock() }
+        }
+    }
+
+    func completeStop(error: Error? = nil) {
+        lock.lock()
+        let continuation = savedContinuation
+        savedContinuation = nil
+        lock.unlock()
+        if let error { continuation?.resume(throwing: error) }
+        else { continuation?.resume() }
     }
 }
