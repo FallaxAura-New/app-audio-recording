@@ -1,175 +1,242 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
 enum RecorderError: LocalizedError {
-    case noDisplay
-    case alreadyRecording
-    case writerSetupFailed
-    case noAudioReceived
-    case writingFailed(String)
-
+    case noDisplay, alreadyRecording, noSource, microphoneDenied, microphoneUnavailable, noAudioReceived
     var errorDescription: String? {
         switch self {
-        case .noDisplay:
-            return "没有找到可用于建立音频捕获的显示器。"
-        case .alreadyRecording:
-            return "已经有一项录音正在进行。"
-        case .writerSetupFailed:
-            return "无法创建 MP4 音频写入器。"
-        case .noAudioReceived:
-            return "没有收到所选软件的声音，请确认直播正在播放。"
-        case .writingFailed(let message):
-            return "写入 MP4 失败：\(message)"
+        case .noDisplay: return "没有找到可用于建立 App 音频捕获的显示器。"
+        case .alreadyRecording: return "已经有一项录音正在进行。"
+        case .noSource: return "请至少开启 App 音频或麦克风中的一项。"
+        case .microphoneDenied: return "麦克风权限未获允许，请在系统设置 → 隐私与安全性 → 麦克风中允许 NRadio 直播录音。"
+        case .microphoneUnavailable: return "无法使用所选麦克风，请确认设备仍连接。"
+        case .noAudioReceived: return "没有收到音频，请确认所选音频源正在工作。"
         }
     }
 }
 
 final class ApplicationAudioRecorder: NSObject, @unchecked Sendable {
-    private final class WriterContext: @unchecked Sendable {
-        let writer: AVAssetWriter
-        let input: AVAssetWriterInput
-
-        init(writer: AVAssetWriter, input: AVAssetWriterInput) {
-            self.writer = writer
-            self.input = input
-        }
-    }
-
+    var onFailure: (@Sendable (Error) -> Void)?
     private let audioQueue = DispatchQueue(label: "com.nradio.recorder.audio", qos: .userInitiated)
+    private let microphoneQueue = DispatchQueue(label: "com.nradio.recorder.microphone", qos: .userInitiated)
     private var stream: SCStream?
-    private var writerContext: WriterContext?
-    private var didStartSession = false
-    private var receivedAudio = false
+    private var microphoneSession: AVCaptureSession?
+    private var microphoneObserver: NSObjectProtocol?
+    private var writer: AudioFileWriter?
+    private var mixer: AudioMixer?
+    private var converters: [AudioSource: PCMConverter] = [:]
+    private var flushTimer: DispatchSourceTimer?
+    private var startTime = CMTime.zero
     private var isAcceptingSamples = false
+    private var terminalError: Error?
 
-    func start(application: SCRunningApplication, outputURL: URL) async throws {
-        guard stream == nil else { throw RecorderError.alreadyRecording }
+    func start(
+        application: SCRunningApplication?,
+        microphone: AVCaptureDevice?,
+        outputURL: URL,
+        format: RecordingFormat
+    ) async throws {
+        guard audioQueue.sync(execute: { writer == nil }) else { throw RecorderError.alreadyRecording }
+        guard application != nil || microphone != nil else { throw RecorderError.noSource }
+        if microphone != nil {
+            let permitted = await AVCaptureDevice.requestAccess(for: .audio)
+            guard permitted else { throw RecorderError.microphoneDenied }
+        }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false,
-            onScreenWindowsOnly: false
-        )
-        guard let display = content.displays.first else { throw RecorderError.noDisplay }
+        if let application {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let display = content.displays.first else { throw RecorderError.noDisplay }
+            let filter = SCContentFilter(display: display, including: [application], exceptingWindows: [])
+            let configuration = SCStreamConfiguration()
+            configuration.capturesAudio = true
+            configuration.excludesCurrentProcessAudio = true
+            configuration.sampleRate = 48_000
+            configuration.channelCount = 2
+            configuration.width = 2
+            configuration.height = 2
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            configuration.queueDepth = 3
+            let capture = SCStream(filter: filter, configuration: configuration, delegate: self)
+            try capture.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+            stream = capture
+        }
 
-        let filter = SCContentFilter(
-            display: display,
-            including: [application],
-            exceptingWindows: []
-        )
-        let configuration = SCStreamConfiguration()
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = 48_000
-        configuration.channelCount = 2
-        configuration.width = 2
-        configuration.height = 2
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        configuration.queueDepth = 3
-
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-        CrashResilientMP4.configure(writer)
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 160_000
-        ]
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
-        input.expectsMediaDataInRealTime = true
-        guard writer.canAdd(input) else { throw RecorderError.writerSetupFailed }
-        writer.add(input)
-
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-
-        self.writerContext = WriterContext(writer: writer, input: input)
-        self.stream = stream
-        didStartSession = false
-        receivedAudio = false
-        isAcceptingSamples = true
-
+        var createdOutput = false
         do {
-            try await stream.startCapture()
+            if let microphone {
+                microphoneSession = try await configureMicrophone(microphone)
+                microphoneObserver = NotificationCenter.default.addObserver(
+                    forName: .AVCaptureSessionRuntimeError, object: microphoneSession, queue: nil
+                ) { [weak self] notification in
+                    let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error ?? RecorderError.microphoneUnavailable
+                    self?.audioQueue.async { [weak self] in self?.fail(error) }
+                }
+            }
+            let newWriter = try AudioFileWriter(url: outputURL, format: format)
+            createdOutput = true
+            audioQueue.sync {
+                writer = newWriter
+                mixer = AudioMixer(sourceCount: (application == nil ? 0 : 1) + (microphone == nil ? 0 : 1))
+                converters = [:]
+                terminalError = nil
+                startTime = CMClockGetTime(CMClockGetHostTimeClock())
+                isAcceptingSamples = true
+                let timer = DispatchSource.makeTimerSource(queue: audioQueue)
+                timer.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20))
+                timer.setEventHandler { [weak self] in
+                    guard let self, self.isAcceptingSamples else { return }
+                    do {
+                        let elapsed = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), self.startTime).seconds
+                        try self.flush(until: Int64(max(0, elapsed - 0.3) * 48_000))
+                    } catch { self.fail(error) }
+                }
+                flushTimer = timer
+                timer.resume()
+            }
+            if let stream { try await stream.startCapture() }
+            if let session = microphoneSession {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    microphoneQueue.async {
+                        session.startRunning()
+                        if session.isRunning { continuation.resume() }
+                        else { continuation.resume(throwing: RecorderError.microphoneUnavailable) }
+                    }
+                }
+            }
         } catch {
-            reset()
+            if let stream { try? await stream.stopCapture() }
+            await stopMicrophone()
+            let empty = audioQueue.sync { () -> Bool in
+                let noFrames = (mixer?.receivedFrames ?? 0) == 0
+                try? writer?.finish()
+                resetAudioState()
+                return noFrames
+            }
+            resetCaptureState()
+            if createdOutput && empty { try? FileManager.default.removeItem(at: outputURL) }
             throw error
         }
     }
 
     func stop() async throws {
-        guard let stream, let writerContext else { return }
+        guard audioQueue.sync(execute: { writer != nil }) else { return }
+        let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
+        audioQueue.sync { flushTimer?.cancel(); flushTimer = nil }
+        var captureError: Error?
+        if let stream {
+            do { try await stream.stopCapture() } catch { captureError = error }
+        }
+        await stopMicrophone()
+        let finalCaptureError = captureError
+        let result: Result<Void, Error> = await withCheckedContinuation { continuation in
+            audioQueue.async { [self] in
+                isAcceptingSamples = false
+                var failure = terminalError ?? finalCaptureError
+                do {
+                    let end = max(0, CMTimeSubtract(stopTime, startTime).seconds)
+                    try flush(until: Int64(end * 48_000))
+                    try writer?.finish()
+                    if mixer?.receivedFrames == 0 { failure = failure ?? RecorderError.noAudioReceived }
+                } catch { failure = failure ?? error }
+                resetAudioState()
+                continuation.resume(returning: failure.map { .failure($0) } ?? .success(()))
+            }
+        }
+        resetCaptureState()
+        try result.get()
+    }
 
-        try await stream.stopCapture()
-        isAcceptingSamples = false
-
-        return try await withCheckedThrowingContinuation { continuation in
-            audioQueue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(throwing: RecorderError.writerSetupFailed)
-                    return
-                }
-
-                guard self.receivedAudio, self.didStartSession else {
-                    writerContext.writer.cancelWriting()
-                    self.reset()
-                    continuation.resume(throwing: RecorderError.noAudioReceived)
-                    return
-                }
-
-                writerContext.input.markAsFinished()
-                writerContext.writer.finishWriting {
-                    let status = writerContext.writer.status
-                    let message = writerContext.writer.error?.localizedDescription ?? "未知错误"
-                    self.reset()
-                    if status == .completed {
-                        continuation.resume()
-                    } else {
-                        continuation.resume(throwing: RecorderError.writingFailed(message))
-                    }
-                }
+    private func configureMicrophone(_ device: AVCaptureDevice) async throws -> AVCaptureSession {
+        try await withCheckedThrowingContinuation { continuation in
+            microphoneQueue.async { [self] in
+                do {
+                    let session = AVCaptureSession()
+                    session.beginConfiguration()
+                    let input = try AVCaptureDeviceInput(device: device)
+                    guard session.canAddInput(input) else { throw RecorderError.microphoneUnavailable }
+                    session.addInput(input)
+                    let output = AVCaptureAudioDataOutput()
+                    output.setSampleBufferDelegate(self, queue: audioQueue)
+                    guard session.canAddOutput(output) else { throw RecorderError.microphoneUnavailable }
+                    session.addOutput(output)
+                    session.commitConfiguration()
+                    continuation.resume(returning: session)
+                } catch { continuation.resume(throwing: error) }
             }
         }
     }
 
-    private func reset() {
+    private func stopMicrophone() async {
+        guard let session = microphoneSession else { return }
+        await withCheckedContinuation { continuation in
+            microphoneQueue.async { session.stopRunning(); continuation.resume() }
+        }
+    }
+
+    private func flush(until endFrame: Int64) throws {
+        guard let mixer, let writer else { return }
+        while mixer.outputFrame < endFrame { try writer.append(mixer.read(until: endFrame)) }
+    }
+
+    private func consume(_ buffer: CMSampleBuffer, source: AudioSource) {
+        guard isAcceptingSamples, buffer.isValid, CMSampleBufferDataIsReady(buffer), let mixer else { return }
+        do {
+            let converter = converters[source] ?? PCMConverter()
+            converters[source] = converter
+            let samples = try converter.convert(buffer)
+            guard !samples.isEmpty else { return }
+            var timestamp = buffer.presentationTimeStamp
+            if source == .microphone, let clock = microphoneSession?.synchronizationClock {
+                timestamp = CMSyncConvertTime(timestamp, from: clock, to: CMClockGetHostTimeClock())
+            }
+            let now = CMClockGetTime(CMClockGetHostTimeClock())
+            var offset = CMTimeSubtract(timestamp, startTime).seconds
+            if !offset.isFinite || abs(CMTimeSubtract(timestamp, now).seconds) > 2 {
+                offset = CMTimeSubtract(now, startTime).seconds - Double(samples.count / 2) / 48_000
+            }
+            try mixer.add(samples, source: source, atFrame: Int64((offset * 48_000).rounded()))
+        } catch { fail(error) }
+    }
+
+    private func fail(_ error: Error) {
+        guard isAcceptingSamples, terminalError == nil else { return }
+        terminalError = error
         isAcceptingSamples = false
+        flushTimer?.cancel()
+        onFailure?(error)
+    }
+
+    private func resetAudioState() {
+        flushTimer?.cancel()
+        flushTimer = nil
+        isAcceptingSamples = false
+        writer = nil
+        mixer = nil
+        converters = [:]
+        terminalError = nil
+    }
+
+    private func resetCaptureState() {
         stream = nil
-        writerContext = nil
-        didStartSession = false
-        receivedAudio = false
+        microphoneSession = nil
+        if let microphoneObserver { NotificationCenter.default.removeObserver(microphoneObserver) }
+        microphoneObserver = nil
     }
 }
 
 extension ApplicationAudioRecorder: SCStreamOutput, SCStreamDelegate {
-    func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        guard outputType == .audio,
-              isAcceptingSamples,
-              sampleBuffer.isValid,
-              CMSampleBufferDataIsReady(sampleBuffer),
-              let writerContext else { return }
-
-        let writer = writerContext.writer
-        let audioInput = writerContext.input
-
-        if !didStartSession {
-            guard writer.startWriting() else { return }
-            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
-            didStartSession = true
-        }
-
-        guard writer.status == .writing, audioInput.isReadyForMoreMediaData else { return }
-        if audioInput.append(sampleBuffer) {
-            receivedAudio = true
-        }
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        if outputType == .audio { consume(sampleBuffer, source: .application) }
     }
-
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        // The UI owns finalization. This delegate is intentionally kept lightweight.
+        audioQueue.async { [weak self] in self?.fail(error) }
+    }
+}
+
+extension ApplicationAudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        consume(sampleBuffer, source: .microphone)
     }
 }

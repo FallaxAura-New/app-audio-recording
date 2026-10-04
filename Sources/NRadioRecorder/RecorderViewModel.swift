@@ -1,23 +1,36 @@
 import AppKit
+import AVFoundation
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
 struct ApplicationSource: Identifiable {
     let application: SCRunningApplication
-
     var id: String { "\(application.bundleIdentifier)-\(application.processID)" }
     var name: String { application.applicationName }
     var bundleIdentifier: String { application.bundleIdentifier }
 }
 
+struct MicrophoneSource: Identifiable {
+    let device: AVCaptureDevice
+    var id: String { device.uniqueID }
+    var name: String { device.localizedName }
+}
+
 @MainActor
 final class RecorderViewModel: ObservableObject {
     static let shared = RecorderViewModel()
-
     @Published var applications: [ApplicationSource] = []
-    @Published var selectedApplicationID: String = ""
+    @Published var microphones: [MicrophoneSource] = []
+    @Published var selectedApplicationID = ""
+    @Published var selectedMicrophoneID = ""
+    @Published var applicationEnabled = true
+    @Published var microphoneEnabled = false
+    @Published var outputFormat: RecordingFormat {
+        didSet { UserDefaults.standard.set(outputFormat.rawValue, forKey: "outputFormat") }
+    }
     @Published var outputDirectory: URL
-    @Published var status = "正在读取可录音的软件…"
+    @Published var status = "正在读取录音来源…"
     @Published var isLoading = false
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
@@ -26,20 +39,33 @@ final class RecorderViewModel: ObservableObject {
     private let recorder = ApplicationAudioRecorder()
     private var timer: Timer?
     private var startedAt: Date?
+    private var captureFailure: Error?
 
     init() {
-        let savedPath = UserDefaults.standard.string(forKey: "outputDirectory")
-        if let savedPath {
-            outputDirectory = URL(fileURLWithPath: savedPath, isDirectory: true)
+        outputFormat = RecordingFormat(rawValue: UserDefaults.standard.string(forKey: "outputFormat") ?? "") ?? .wav
+        if let path = UserDefaults.standard.string(forKey: "outputDirectory") {
+            outputDirectory = URL(fileURLWithPath: path, isDirectory: true)
         } else {
             outputDirectory = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Movies", isDirectory: true)
                 .appendingPathComponent("NRadio Live Recordings", isDirectory: true)
         }
+        recorder.onFailure = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.captureFailure = error
+                if self.isRecording {
+                    await self.stopRecording()
+                    self.status = "音频源中断，已保存可用录音：\(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     var canStart: Bool {
-        !selectedApplicationID.isEmpty && !isLoading && !isRecording
+        let appReady = !applicationEnabled || applications.contains { $0.id == selectedApplicationID }
+        let micReady = !microphoneEnabled || microphones.contains { $0.id == selectedMicrophoneID }
+        return (applicationEnabled || microphoneEnabled) && appReady && micReady && !isLoading && !isRecording
     }
 
     var elapsedText: String {
@@ -48,39 +74,70 @@ final class RecorderViewModel: ObservableObject {
     }
 
     var selectedApplicationName: String {
-        applications.first(where: { $0.id == selectedApplicationID })?.name ?? "未选择"
+        applications.first(where: { $0.id == selectedApplicationID })?.name ?? "未选择 App"
+    }
+
+    var sourceDescription: String {
+        var names: [String] = []
+        if applicationEnabled { names.append(selectedApplicationName) }
+        if microphoneEnabled {
+            names.append(microphones.first(where: { $0.id == selectedMicrophoneID })?.name ?? "未选择麦克风")
+        }
+        return names.isEmpty ? "请至少开启一个音频源" : names.joined(separator: " + ")
+    }
+
+    func loadSources() async {
+        loadMicrophones()
+        if applicationEnabled && CGPreflightScreenCaptureAccess() { await loadApplications() }
+        else if applicationEnabled {
+            status = "录 App 音频请点击刷新并授权；仅录麦克风可关闭 App 音频，无需屏幕录制权限。"
+        } else { status = "请选择麦克风，并点击开始录音。" }
+    }
+
+    func loadMicrophones() {
+        guard !isRecording else { return }
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+        if #available(macOS 14.0, *) { deviceTypes = [.microphone] }
+        else { deviceTypes = [.builtInMicrophone, .externalUnknown] }
+        microphones = AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes, mediaType: .audio, position: .unspecified
+        ).devices
+            .map(MicrophoneSource.init)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if !microphones.contains(where: { $0.id == selectedMicrophoneID }) {
+            selectedMicrophoneID = AVCaptureDevice.default(for: .audio)?.uniqueID ?? microphones.first?.id ?? ""
+        }
     }
 
     func loadApplications() async {
-        guard !isRecording else { return }
+        guard !isRecording, applicationEnabled else { return }
         isLoading = true
         status = "正在读取可录音的软件…"
         defer { isLoading = false }
-
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: false
-            )
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             let ownPID = ProcessInfo.processInfo.processIdentifier
             let visiblePIDs = Set(content.windows.compactMap { $0.owningApplication?.processID })
-
             applications = content.applications
                 .filter { $0.processID != ownPID && visiblePIDs.contains($0.processID) }
                 .map(ApplicationSource.init)
-                .sorted {
-                    $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-                }
-
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             if !applications.contains(where: { $0.id == selectedApplicationID }) {
                 selectedApplicationID = applications.first?.id ?? ""
             }
             status = applications.isEmpty
-                ? "没有发现可录音的软件，请先打开直播软件后再刷新。"
-                : "请选择正在播放直播的软件。"
+                ? "请先打开要录音的软件后再刷新；也可以关闭 App 音频，仅录麦克风。"
+                : "选择音频源与输出格式后即可开始录音。"
         } catch {
-            status = permissionMessage(for: error)
+            status = "无法读取 App 列表。请在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许本应用。仅录麦克风时可关闭 App 音频。详情：\(error.localizedDescription)"
         }
+    }
+
+    func sourcesChanged() {
+        status = (applicationEnabled || microphoneEnabled)
+            ? "已选择：\(sourceDescription)。"
+            : "请至少开启 App 音频或麦克风中的一项。"
+        loadMicrophones()
     }
 
     func chooseOutputDirectory() {
@@ -92,7 +149,6 @@ final class RecorderViewModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = outputDirectory
-
         if panel.runModal() == .OK, let url = panel.url {
             outputDirectory = url
             UserDefaults.standard.set(url.path, forKey: "outputDirectory")
@@ -101,16 +157,12 @@ final class RecorderViewModel: ObservableObject {
     }
 
     func toggleRecording() async {
-        if isRecording {
-            await stopRecording()
-        } else {
-            await startRecording()
-        }
+        guard !isLoading else { return }
+        if isRecording { await stopRecording() } else { await startRecording() }
     }
 
     func prepareForTermination() async {
         guard isRecording else { return }
-        status = "正在安全结束录音后退出…"
         await stopRecording()
     }
 
@@ -119,31 +171,29 @@ final class RecorderViewModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    func openSystemSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
-        NSWorkspace.shared.open(url)
+    func openSystemSettings(microphone: Bool = false) {
+        let panel = microphone ? "Privacy_Microphone" : "Privacy_ScreenCapture"
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(panel)") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func startRecording() async {
-        guard let source = applications.first(where: { $0.id == selectedApplicationID }) else {
-            status = "请先选择一个录音软件。"
-            return
-        }
-
+        guard canStart else { sourcesChanged(); return }
+        let application = applicationEnabled ? applications.first { $0.id == selectedApplicationID }?.application : nil
+        let microphone = microphoneEnabled ? microphones.first { $0.id == selectedMicrophoneID }?.device : nil
         isLoading = true
+        captureFailure = nil
         status = "正在准备音频录制…"
         defer { isLoading = false }
-
         do {
-            try FileManager.default.createDirectory(
-                at: outputDirectory,
-                withIntermediateDirectories: true
-            )
-            let outputURL = uniqueOutputURL(applicationName: source.name)
-            try await recorder.start(
-                application: source.application,
-                outputURL: outputURL
-            )
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            let outputURL = uniqueOutputURL()
+            try await recorder.start(application: application, microphone: microphone, outputURL: outputURL, format: outputFormat)
+            if let captureFailure {
+                try? await recorder.stop()
+                throw captureFailure
+            }
             lastRecordingURL = outputURL
             isRecording = true
             elapsed = 0
@@ -154,45 +204,43 @@ final class RecorderViewModel: ObservableObject {
                     self.elapsed = Date().timeIntervalSince(startedAt)
                 }
             }
-            status = "正在录制“\(source.name)”的声音，麦克风未启用。"
+            status = "正在录制：\(sourceDescription) · \(outputFormat.rawValue.uppercased())"
         } catch {
             status = "无法开始录音：\(error.localizedDescription)"
         }
     }
 
     private func stopRecording() async {
+        guard isRecording else { return }
         timer?.invalidate()
         timer = nil
         isLoading = true
-        status = "正在保存 MP4 文件…"
-
+        status = "正在保存 \(outputFormat.rawValue.uppercased()) 文件…"
         do {
             try await recorder.stop()
-            isRecording = false
-            startedAt = nil
-            status = "录音已保存，可以直接交给 Codex 转写和总结。"
+            status = "录音已保存。"
         } catch {
-            isRecording = false
-            startedAt = nil
-            status = "停止录音时出现问题：\(error.localizedDescription)"
+            status = "录音已停止：\(error.localizedDescription)。已写入的文件保留在所选目录。"
         }
+        isRecording = false
+        startedAt = nil
         isLoading = false
     }
 
-    private func uniqueOutputURL(applicationName: String) -> URL {
+    private func uniqueOutputURL() -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-
-        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
-        let safeName = applicationName
-            .components(separatedBy: invalid)
+        let safeName = sourceDescription
+            .components(separatedBy: CharacterSet(charactersIn: "/:\\?%*|\"<>"))
             .joined(separator: "-")
-        let filename = "张导直播_\(safeName)_\(formatter.string(from: Date())).mp4"
-        return outputDirectory.appendingPathComponent(filename)
-    }
-
-    private func permissionMessage(for error: Error) -> String {
-        "无法读取软件列表。请在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许 NRadio 直播录音，然后重新打开应用。详情：\(error.localizedDescription)"
+        let stem = "录音_\(safeName)_\(formatter.string(from: Date()))"
+        var candidate = outputDirectory.appendingPathComponent("\(stem).\(outputFormat.rawValue)")
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = outputDirectory.appendingPathComponent("\(stem)-\(suffix).\(outputFormat.rawValue)")
+            suffix += 1
+        }
+        return candidate
     }
 }

@@ -1,75 +1,88 @@
 # App Audio Recording / NRadio 直播录音
 
-一个只录制指定软件声音的轻量桌面工具，支持 macOS 和 Windows。它不会调用麦克风，也不会写入屏幕画面；输出文件是仅包含 AAC 音频轨道的 `.mp4`，适合直播存档、转写、总结和知识库整理。
+轻量本地录音工具，提供 macOS 和 Windows 版本。可以录制指定 App 的声音、所选麦克风，或同时混录；输出只允许 WAV 或 MP3，不保存视频。
 
 ## 功能
 
-- 从正在运行的软件中选择录音来源
-- 只捕获该软件及其子进程播放的系统音频
-- 不访问麦克风，不生成视频轨道
-- 自由选择保存目录，文件名自动带日期时间
-- macOS 每 10 秒写入一个可恢复的 MP4 片段，异常退出不会再损坏整场录音
-- macOS 正常退出时会先停止并封口当前录音
-- macOS 使用 Apple ScreenCaptureKit
-- Windows 使用 WASAPI Process Loopback 和 Media Foundation
-- GitHub Actions 自动构建两端安装包
-
-## 直接下载
-
-进入仓库的 **Releases** 页面下载对应平台：
-
-- `NRadioRecorder-macOS.zip`：macOS 13 或更高版本
-- `NRadioRecorder-Windows-x64.zip`：Windows 10 2004（build 19041）或更高版本，64 位
-
-Windows 包含运行时，解压后直接运行 `NRadioRecorder.exe`。未使用付费代码签名证书时，Windows SmartScreen 或 macOS Gatekeeper 可能会显示未知开发者提示。
+- 默认仅录 App 音频，麦克风关闭
+- App 音频与麦克风独立开关：仅 App、仅麦克风、两者混录
+- 选择正在运行的 App、麦克风设备和保存目录
+- 选择 WAV（48 kHz / 16-bit / 双声道）或 MP3（192 kbps / 双声道）
+- 混录按时间戳对齐，两路各使用 50% 音量避免直接相加削波；单路保留原音量
+- 静音不缩短录音；两路都关闭时无法开始
+- 同名文件不覆盖，录音中不能更换音频源、输出格式或保存位置
+- WAV 每秒更新文件头并同步落盘；超过 4 GiB 时自动改用 RF64
+- macOS MP3 边录边编码，每秒同步落盘；正常退出会先保存
+- Windows MP3 先录制同目录的 `.mp3.recording.wav`，停止后转换，转换成功才清理中间文件；失败或异常退出可保留 WAV
+- 不上传音频，无网络请求或遥测
 
 ## 使用方法
 
-1. 先打开直播软件或浏览器并开始播放。
-2. 打开 NRadio 直播录音，刷新并选择目标软件。
-3. 选择录音保存位置，点击“开始录音”。
-4. 直播结束后点击“停止并保存”，等待 MP4 编码完成。
+1. 打开要录制的 App；录 App 音频时让它开始播放。
+2. 勾选需要的音频源：
+   - 仅 App：开启“App 音频”，关闭“麦克风”。
+   - 仅麦克风：关闭“App 音频”，开启“麦克风”。
+   - 混录：两者都开启。
+3. 选择 App 和／或麦克风设备。
+4. 选择保存目录及 WAV／MP3。
+5. 点击“开始录音”，结束时点击“停止并保存”。
 
-Chrome、Edge 等浏览器会把标签页音频放在子进程中，Windows 版会包含所选主进程的子进程，macOS 版会包含所选应用的声音。为了避免混入其他内容，录音期间不要在同一浏览器中播放无关音视频。
+仅录麦克风不建立 App 音频捕获。macOS 开启 App 音频时需要“屏幕与系统音频录制”权限，但程序只注册音频输出，不保存画面；只有启用麦克风并开始录音时才请求麦克风权限。Windows 请在系统隐私设置中允许桌面应用访问麦克风。
+
+Chrome、Edge 等浏览器的其他标签页可能属于同一 App／进程树。录音期间避免在同一浏览器中播放无关内容。混录建议使用耳机，以免麦克风再次拾取扬声器声音造成回声；本程序不额外做回声消除。
+
+## 下载与系统要求
+
+从仓库 Releases 下载对应平台的 ZIP。旧 Release 仍可能只有旧的 App 录音／MP4 功能，新代码需要重新构建发布。
+
+- macOS 13+，本地构建需要 Swift 5.9+、Homebrew 和 LAME。
+- Windows x64：麦克风录音可用于 Windows 10 2004+；指定进程音频捕获需要 Windows build 20348+（常规桌面版建议 Windows 11）。参见 [Microsoft 应用回环示例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)。
+- Windows ZIP 包含运行时，解压后运行 `NRadioRecorder.exe`。
+- 未付费签名的程序可能显示 Gatekeeper／SmartScreen 提示。
 
 ## macOS 本地构建
 
-需要 macOS 13+ 和 Swift 5.9+：
-
 ```bash
-chmod +x scripts/*.sh
+brew install lame
 ./scripts/build-app.sh
 open "dist/NRadio 直播录音.app"
 ```
 
-首次打开时，macOS 会请求“屏幕与系统音频录制”权限。虽然系统权限名称包含“屏幕”，本程序只注册音频输出，不会保存画面。
+构建脚本将 LAME 动态库及许可证打包到应用内，使用者不需要安装 Homebrew 或 LAME。当前打包架构跟随构建机器。
 
-macOS 版使用 fragmented MP4，每 10 秒把可播放的片段索引写入文件。即使程序崩溃、被强制关闭或电脑意外断电，已经落盘的片段仍可播放，通常最多损失最后约 10 秒；正常点击“停止并保存”或正常退出应用时，程序仍会完成标准封口。
+```bash
+swift test --disable-sandbox
+```
+
+测试覆盖单路／混录、静音时长、环形缓冲、异常数值、WAV 检查点、RF64 文件头、文件防覆盖、44.1 kHz 单声道转换，以及三种模式的 WAV／MP3 音频轨道与时长。测试使用合成声音，不替代设备上的 App／麦克风实际录制验收。
 
 ## Windows 本地构建
 
-需要 Windows 10 2004+ 和 .NET 9 SDK：
+需要 .NET 9 SDK：
 
 ```powershell
 dotnet publish Windows/NRadioRecorder.Windows/NRadioRecorder.Windows.csproj `
   -c Release -r win-x64 --self-contained true -o publish/windows
 ```
 
-Windows 版使用 [NAudio](https://github.com/naudio/NAudio) 3 的 WASAPI 进程回环接口。停止录制时，程序先结束无损临时音频流，再通过 Windows Media Foundation 编码为 160 kbps AAC/MP4，完成后自动清理临时文件。
+Windows 使用 [NAudio](https://github.com/naudio/NAudio) 3 的 WASAPI 进程回环及麦克风捕获，并通过 Media Foundation 编码 MP3。WAV 中间文件会占用较多磁盘空间（约 11.5 MB／分钟）；MP3 转换失败时可直接使用保留的 WAV。
 
-## 发布 Release
-
-推送形如 `v1.0.0` 的标签后，`.github/workflows/release.yml` 会自动构建 macOS 和 Windows ZIP，并创建 GitHub Release：
+音频核心检查可在有 .NET 9 的 macOS 或 Windows 运行：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+dotnet run --project Tests/WindowsCoreTests/WindowsCoreTests.csproj -c Release
 ```
 
-## 隐私
+核心检查与交叉编译不代表 Windows 真机的麦克风、WASAPI、Media Foundation 或界面已验收。
 
-录音完全保存在本机。应用没有网络请求、遥测或分析服务，也不会上传录音。
+## 异常退出
+
+WAV 每秒写入可读文件头，已同步的数据会保留，断电或强制退出仍可能损失最后的未同步数据。macOS MP3 已写入的完整帧通常可解码，但异常退出可能失去尾部帧。Windows MP3 异常退出时请使用同目录的 `.mp3.recording.wav`。停止或编码失败不会主动删除已录的 WAV。不要将这些机制当作备份。
+
+## 发布
+
+推送 `v*` 标签时，GitHub Actions 构建两端 ZIP 并创建 Release。此工作流不会因为本地构建自动发布。
 
 ## License
 
-[MIT](LICENSE)。Windows 音频功能依赖同为 MIT License 的 [NAudio](https://github.com/naudio/NAudio)。
+项目：[MIT](LICENSE)。Windows：[NAudio / MIT](https://github.com/naudio/NAudio)。macOS MP3 编码：[LAME / LGPL 2.0](https://lame.sourceforge.io/)（动态链接，应用包包含许可证；LAME 源码见其官网）。
