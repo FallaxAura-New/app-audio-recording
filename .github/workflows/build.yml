@@ -11,6 +11,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Install MP3 encoder
+        run: brew install lame
       - name: Test macOS recorder
         run: swift test --disable-sandbox
       - name: Build macOS app
@@ -29,6 +31,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 9.0.x
+      - name: Test Windows audio core
+        run: dotnet run --project Tests/WindowsCoreTests/WindowsCoreTests.csproj -c Release
       - name: Publish self-contained Windows app
         run: dotnet publish Windows/NRadioRecorder.Windows/NRadioRecorder.Windows.csproj -c Release -r win-x64 --self-contained true -o publish/windows
       - name: Package Windows app

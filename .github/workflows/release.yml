@@ -26,12 +26,15 @@ jobs:
       - name: Build macOS
         if: runner.os == 'macOS'
         run: |
+          brew install lame
+          swift test --disable-sandbox
           ./scripts/build-app.sh
           ditto -c -k --sequesterRsrc --keepParent "dist/NRadio 直播录音.app" "${{ matrix.artifact }}"
       - name: Build Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          dotnet run --project Tests/WindowsCoreTests/WindowsCoreTests.csproj -c Release
           dotnet publish Windows/NRadioRecorder.Windows/NRadioRecorder.Windows.csproj -c Release -r win-x64 --self-contained true -o publish/windows
           Compress-Archive -Path publish/windows/* -DestinationPath "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4

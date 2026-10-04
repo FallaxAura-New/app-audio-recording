@@ -6,6 +6,10 @@ namespace NRadioRecorder.Windows;
 internal sealed class MainForm : Form
 {
     private readonly ComboBox processPicker = new();
+    private readonly ComboBox microphonePicker = new();
+    private readonly ComboBox formatPicker = new();
+    private readonly CheckBox applicationEnabled = new() { Text = "录制 App 音频", Checked = true, AutoSize = true };
+    private readonly CheckBox microphoneEnabled = new() { Text = "录制麦克风", AutoSize = true };
     private readonly TextBox outputDirectory = new();
     private readonly Button refreshButton = new();
     private readonly Button chooseFolderButton = new();
@@ -18,20 +22,29 @@ internal sealed class MainForm : Form
     private readonly RecordingService recordingService = new();
     private DateTimeOffset startedAt;
     private string? lastRecordingPath;
+    private bool busy;
 
     public MainForm()
     {
         Text = "NRadio 直播录音";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(700, 560);
-        ClientSize = new Size(760, 610);
+        MinimumSize = new Size(700, 700);
+        ClientSize = new Size(760, 760);
         BackColor = Color.FromArgb(17, 20, 32);
         ForeColor = Color.White;
         Font = new Font("Microsoft YaHei UI", 10F);
         AutoScaleMode = AutoScaleMode.Dpi;
 
         BuildInterface();
-        Load += (_, _) => RefreshApplications();
+        Load += (_, _) => RefreshSources();
+        recordingService.Failed += _ =>
+        {
+            if (!IsDisposed && IsHandleCreated) BeginInvoke(async () =>
+            {
+                if (recordingService.IsRecording && recordingService.HasFailure && !busy)
+                    await StopRecordingAsync();
+            });
+        };
         FormClosing += OnFormClosing;
         elapsedTimer.Tick += (_, _) => UpdateElapsedTime();
     }
@@ -43,10 +56,14 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(34, 28, 34, 28),
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 11,
             BackColor = Color.Transparent
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
@@ -66,7 +83,7 @@ internal sealed class MainForm : Form
         });
         titlePanel.Controls.Add(new Label
         {
-            Text = "只保存指定软件的声音 · 不录屏 · 不调用麦克风",
+            Text = "App 音频 / 麦克风 / 两者混录 · WAV 或 MP3 · 不录视频",
             Font = new Font(Font.FontFamily, 9.5F),
             ForeColor = Color.FromArgb(165, 170, 188),
             AutoSize = true,
@@ -74,16 +91,29 @@ internal sealed class MainForm : Form
         });
         root.Controls.Add(titlePanel, 0, 0);
 
-        root.Controls.Add(SectionLabel("录音来源"), 0, 1);
+        applicationEnabled.Dock = DockStyle.Fill;
+        applicationEnabled.CheckedChanged += (_, _) => UpdateSourceControls();
+        root.Controls.Add(applicationEnabled, 0, 1);
         var sourceRow = TwoColumnRow(refreshButton, 106);
         ConfigurePicker(processPicker);
         sourceRow.Controls.Add(processPicker, 0, 0);
         refreshButton.Text = "↻  刷新";
         StyleSecondaryButton(refreshButton);
-        refreshButton.Click += (_, _) => RefreshApplications();
+        refreshButton.Click += (_, _) => RefreshSources();
         root.Controls.Add(sourceRow, 0, 2);
 
-        root.Controls.Add(SectionLabel("保存位置"), 0, 3);
+        microphoneEnabled.Dock = DockStyle.Fill;
+        microphoneEnabled.CheckedChanged += (_, _) => UpdateSourceControls();
+        root.Controls.Add(microphoneEnabled, 0, 3);
+        ConfigurePicker(microphonePicker);
+        root.Controls.Add(microphonePicker, 0, 4);
+
+        root.Controls.Add(SectionLabel("输出格式"), 0, 5);
+        ConfigurePicker(formatPicker);
+        formatPicker.DataSource = new[] { "WAV · 无损音频", "MP3 · 小体积" };
+        root.Controls.Add(formatPicker, 0, 6);
+
+        root.Controls.Add(SectionLabel("保存位置"), 0, 7);
         var destinationRow = TwoColumnRow(chooseFolderButton, 106);
         ConfigureTextBox(outputDirectory);
         outputDirectory.Text = Path.Combine(
@@ -93,7 +123,7 @@ internal sealed class MainForm : Form
         chooseFolderButton.Text = "选择…";
         StyleSecondaryButton(chooseFolderButton);
         chooseFolderButton.Click += (_, _) => ChooseOutputFolder();
-        root.Controls.Add(destinationRow, 0, 4);
+        root.Controls.Add(destinationRow, 0, 8);
 
         var recordingCard = new RoundedPanel
         {
@@ -102,7 +132,7 @@ internal sealed class MainForm : Form
             Padding = new Padding(24),
             BackColor = Color.FromArgb(29, 32, 47)
         };
-        root.Controls.Add(recordingCard, 0, 5);
+        root.Controls.Add(recordingCard, 0, 9);
 
         var indicator = new Panel
         {
@@ -130,7 +160,7 @@ internal sealed class MainForm : Form
 
         var formatLabel = new Label
         {
-            Text = "输出为仅含 AAC 音频轨道的 MP4",
+            Text = "纯音频 · 48 kHz · 双声道",
             ForeColor = Color.FromArgb(155, 160, 178),
             AutoSize = true,
             Location = new Point(99, 105)
@@ -169,7 +199,34 @@ internal sealed class MainForm : Form
         StyleLinkButton(revealButton);
         revealButton.Click += (_, _) => RevealLastRecording();
         footer.Controls.Add(revealButton, 1, 0);
-        root.Controls.Add(footer, 0, 6);
+        root.Controls.Add(footer, 0, 10);
+    }
+
+    private void RefreshSources()
+    {
+        RefreshApplications();
+        var previousId = (microphonePicker.SelectedItem as MicrophoneItem)?.Id;
+        try
+        {
+            var microphones = MicrophoneItem.GetAvailable();
+            microphonePicker.DataSource = microphones;
+            microphonePicker.DisplayMember = nameof(MicrophoneItem.Name);
+            var previous = microphones.FirstOrDefault(item => item.Id == previousId);
+            if (previous is not null) microphonePicker.SelectedItem = previous;
+        }
+        catch (Exception ex) { statusLabel.Text = $"无法读取麦克风：{ex.Message}。仍可仅录 App 音频。"; }
+        UpdateSourceControls();
+    }
+
+    private void UpdateSourceControls()
+    {
+        var editable = !busy && !recordingService.IsRecording;
+        applicationEnabled.Enabled = microphoneEnabled.Enabled = formatPicker.Enabled = editable;
+        processPicker.Enabled = editable && applicationEnabled.Checked;
+        microphonePicker.Enabled = editable && microphoneEnabled.Checked;
+        refreshButton.Enabled = outputDirectory.Enabled = chooseFolderButton.Enabled = editable;
+        recordButton.Enabled = !busy && (recordingService.IsRecording ||
+            (applicationEnabled.Checked || microphoneEnabled.Checked));
     }
 
     private void RefreshApplications()
@@ -192,6 +249,7 @@ internal sealed class MainForm : Form
 
     private async Task ToggleRecordingAsync()
     {
+        if (busy) return;
         if (recordingService.IsRecording)
         {
             await StopRecordingAsync();
@@ -204,9 +262,21 @@ internal sealed class MainForm : Form
 
     private async Task StartRecordingAsync()
     {
-        if (processPicker.SelectedItem is not ProcessItem process)
+        var process = applicationEnabled.Checked ? processPicker.SelectedItem as ProcessItem : null;
+        var microphone = microphoneEnabled.Checked ? microphonePicker.SelectedItem as MicrophoneItem : null;
+        if (!applicationEnabled.Checked && !microphoneEnabled.Checked)
+        {
+            ShowError("请至少开启 App 音频或麦克风中的一项。");
+            return;
+        }
+        if (applicationEnabled.Checked && process is null)
         {
             ShowError("请先选择一个录音软件。");
+            return;
+        }
+        if (microphoneEnabled.Checked && microphone is null)
+        {
+            ShowError("请先选择一个可用麦克风。");
             return;
         }
 
@@ -217,42 +287,52 @@ internal sealed class MainForm : Form
         }
 
         SetBusy(true);
-        statusLabel.Text = "正在准备 WASAPI 进程音频捕获…";
+        statusLabel.Text = "正在准备所选音频源…";
 
         try
         {
-            var safeName = string.Concat(process.Name.Select(ch => Path.GetInvalidFileNameChars().Contains(ch) ? '-' : ch));
-            var fileName = $"张导直播_{safeName}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4";
-            lastRecordingPath = Path.Combine(outputDirectory.Text.Trim(), fileName);
-            await recordingService.StartAsync((uint)process.Id, lastRecordingPath);
+            var sourceName = string.Join(" + ", new[] { process?.Name, microphone?.Name }.Where(name => name is not null));
+            var safeName = string.Concat(sourceName.Select(ch => Path.GetInvalidFileNameChars().Contains(ch) ? '-' : ch));
+            var format = formatPicker.SelectedIndex == 1 ? RecordingFormat.Mp3 : RecordingFormat.Wav;
+            var stem = $"录音_{safeName}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}";
+            var extension = format == RecordingFormat.Wav ? "wav" : "mp3";
+            var suffix = 1;
+            do
+            {
+                var fileName = $"{stem}{(suffix == 1 ? "" : "-" + suffix)}.{extension}";
+                lastRecordingPath = Path.Combine(Path.GetFullPath(outputDirectory.Text.Trim()), fileName);
+                suffix++;
+            } while (File.Exists(lastRecordingPath) || File.Exists(lastRecordingPath + ".recording.wav"));
+            revealButton.Visible = false;
+            await recordingService.StartAsync(process is null ? null : (uint)process.Id, microphone?.Id, lastRecordingPath, format);
 
             startedAt = DateTimeOffset.Now;
+            timerLabel.Text = "00:00:00";
             elapsedTimer.Start();
             stateLabel.Text = "正在录制";
             recordButton.Text = "停止并保存";
             recordButton.BackColor = Color.FromArgb(220, 62, 77);
-            statusLabel.Text = $"正在录制“{process.Name}”及其子进程的声音，麦克风未启用。";
-            processPicker.Enabled = false;
-            refreshButton.Enabled = false;
-            outputDirectory.Enabled = false;
-            chooseFolderButton.Enabled = false;
+            statusLabel.Text = $"正在录制：{sourceName} · {extension.ToUpperInvariant()}";
         }
         catch (Exception ex)
         {
-            lastRecordingPath = null;
+            lastRecordingPath = recordingService.RecoverablePath;
+            revealButton.Visible = lastRecordingPath is not null;
             ShowError($"无法开始录音：{ex.Message}");
         }
         finally
         {
             SetBusy(false);
+            if (recordingService.IsRecording && recordingService.HasFailure) await StopRecordingAsync();
         }
     }
 
     private async Task StopRecordingAsync()
     {
+        if (busy || !recordingService.IsRecording) return;
         elapsedTimer.Stop();
         SetBusy(true);
-        statusLabel.Text = "正在编码并保存 MP4，请稍候…";
+        statusLabel.Text = formatPicker.SelectedIndex == 1 ? "正在编码并保存 MP3，请稍候…" : "正在保存 WAV…";
 
         try
         {
@@ -262,7 +342,8 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            lastRecordingPath = null;
+            lastRecordingPath = recordingService.RecoverablePath;
+            revealButton.Visible = lastRecordingPath is not null;
             ShowError($"停止录音时出现问题：{ex.Message}");
         }
         finally
@@ -270,10 +351,6 @@ internal sealed class MainForm : Form
             stateLabel.Text = "准备录制";
             recordButton.Text = "开始录音";
             recordButton.BackColor = Color.FromArgb(112, 86, 236);
-            processPicker.Enabled = true;
-            refreshButton.Enabled = true;
-            outputDirectory.Enabled = true;
-            chooseFolderButton.Enabled = true;
             SetBusy(false);
         }
     }
@@ -311,8 +388,9 @@ internal sealed class MainForm : Form
 
     private void SetBusy(bool busy)
     {
+        this.busy = busy;
         UseWaitCursor = busy;
-        recordButton.Enabled = !busy;
+        UpdateSourceControls();
     }
 
     private void ShowError(string message)
@@ -323,6 +401,12 @@ internal sealed class MainForm : Form
 
     private async void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        // Do not dispose this form while a start or save continuation is pending.
+        if (busy)
+        {
+            e.Cancel = true;
+            return;
+        }
         if (!recordingService.IsRecording) return;
 
         e.Cancel = true;

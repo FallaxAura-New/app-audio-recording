@@ -11,3 +11,5 @@ DerivedData/
 **/obj/
 publish/
 *.wav
+*.mp3
+.nuget/

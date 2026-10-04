@@ -24,7 +24,14 @@ struct RecorderView: View {
         }
         .preferredColorScheme(.dark)
         .task {
-            await model.loadApplications()
+            await model.loadSources()
+        }
+        .onChange(of: model.applicationEnabled) { enabled in
+            model.sourcesChanged()
+            if enabled { Task { await model.loadApplications() } }
+        }
+        .onChange(of: model.microphoneEnabled) { _ in
+            model.sourcesChanged()
         }
     }
 
@@ -32,7 +39,7 @@ struct RecorderView: View {
         VStack(alignment: .leading, spacing: 7) {
             Text("NRadio 直播录音")
                 .font(.system(size: 28, weight: .bold, design: .rounded))
-            Text("只保存指定软件的声音 · 不录屏 · 不调用麦克风")
+            Text("App 音频、麦克风或同时录制 · 只保存声音")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 14))
         }
@@ -40,9 +47,13 @@ struct RecorderView: View {
 
     private var sourceSection: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text("录音来源")
+            Text("录音来源 · 可以同时开启")
                 .font(.headline)
             HStack(spacing: 10) {
+                Toggle("App 音频", isOn: $model.applicationEnabled)
+                    .toggleStyle(.checkbox)
+                    .frame(width: 105, alignment: .leading)
+                    .disabled(model.isRecording || model.isLoading)
                 Picker("", selection: $model.selectedApplicationID) {
                     if model.applications.isEmpty {
                         Text("请先打开直播软件").tag("")
@@ -53,14 +64,30 @@ struct RecorderView: View {
                     }
                 }
                 .labelsHidden()
-                .disabled(model.isRecording || model.isLoading)
+                .disabled(!model.applicationEnabled || model.isRecording || model.isLoading)
 
                 Button {
                     Task { await model.loadApplications() }
                 } label: {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isRecording || model.isLoading)
+                .disabled(!model.applicationEnabled || model.isRecording || model.isLoading)
+            }
+            HStack(spacing: 10) {
+                Toggle("麦克风", isOn: $model.microphoneEnabled)
+                    .toggleStyle(.checkbox)
+                    .frame(width: 105, alignment: .leading)
+                    .disabled(model.isRecording || model.isLoading)
+                Picker("", selection: $model.selectedMicrophoneID) {
+                    if model.microphones.isEmpty { Text("未发现麦克风").tag("") }
+                    ForEach(model.microphones) { source in Text(source.name).tag(source.id) }
+                }
+                .labelsHidden()
+                .disabled(!model.microphoneEnabled || model.isRecording || model.isLoading)
+                Button { model.loadMicrophones() } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .disabled(!model.microphoneEnabled || model.isRecording || model.isLoading)
             }
         }
     }
@@ -84,6 +111,15 @@ struct RecorderView: View {
                 }
                 .disabled(model.isRecording || model.isLoading)
             }
+            HStack(spacing: 12) {
+                Text("输出格式").font(.headline)
+                Picker("输出格式", selection: $model.outputFormat) {
+                    ForEach(RecordingFormat.allCases) { format in Text(format.label).tag(format) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(model.isRecording || model.isLoading)
+            }
         }
     }
 
@@ -104,7 +140,7 @@ struct RecorderView: View {
                 Text(model.elapsedText)
                     .font(.system(size: 34, weight: .medium, design: .monospaced))
                     .contentTransition(.numericText())
-                Text(model.isRecording ? model.selectedApplicationName : "输出为仅含音频轨道的 MP4")
+                Text(model.isRecording ? model.sourceDescription : "输出为 \(model.outputFormat.rawValue.uppercased()) 音频")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -147,10 +183,14 @@ struct RecorderView: View {
                 }
                 .buttonStyle(.link)
             }
-            Button("录音权限设置") {
-                model.openSystemSettings()
+            if model.microphoneEnabled {
+                Button("麦克风权限") { model.openSystemSettings(microphone: true) }
+                    .buttonStyle(.link)
             }
-            .buttonStyle(.link)
+            if model.applicationEnabled {
+                Button("App 录音权限") { model.openSystemSettings() }
+                    .buttonStyle(.link)
+            }
         }
     }
 }

@@ -22,7 +22,7 @@ struct NRadioRecorderApp: App {
     var body: some Scene {
         WindowGroup {
             RecorderView(model: model)
-                .frame(minWidth: 620, minHeight: 520)
+                .frame(minWidth: 700, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
