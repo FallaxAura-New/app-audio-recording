@@ -59,16 +59,8 @@ internal sealed class MainForm : Form
             RowCount = 11,
             BackColor = Color.Transparent
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
+        foreach (var height in new[] { 82, 32, 58, 32, 58, 32, 58, 32, 58, 190 })
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
@@ -83,7 +75,7 @@ internal sealed class MainForm : Form
         });
         titlePanel.Controls.Add(new Label
         {
-            Text = "App 音频 / 麦克风 / 两者混录 · WAV 或 MP3 · 不录视频",
+            Text = "App 音频与麦克风录音",
             Font = new Font(Font.FontFamily, 9.5F),
             ForeColor = Color.FromArgb(165, 170, 188),
             AutoSize = true,
@@ -110,7 +102,7 @@ internal sealed class MainForm : Form
 
         root.Controls.Add(SectionLabel("输出格式"), 0, 5);
         ConfigurePicker(formatPicker);
-        formatPicker.DataSource = new[] { "WAV · 无损音频", "MP3 · 小体积" };
+        formatPicker.DataSource = new[] { "WAV", "MP3" };
         root.Controls.Add(formatPicker, 0, 6);
 
         root.Controls.Add(SectionLabel("保存位置"), 0, 7);
@@ -160,7 +152,7 @@ internal sealed class MainForm : Form
 
         var formatLabel = new Label
         {
-            Text = "纯音频 · 48 kHz · 双声道",
+            Text = "48 kHz · 双声道",
             ForeColor = Color.FromArgb(155, 160, 178),
             AutoSize = true,
             Location = new Point(99, 105)
@@ -188,7 +180,7 @@ internal sealed class MainForm : Form
         };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        statusLabel.Text = "请选择正在播放直播的软件。";
+        statusLabel.Text = "请选择录音来源。";
         statusLabel.ForeColor = Color.FromArgb(165, 170, 188);
         statusLabel.AutoEllipsis = true;
         statusLabel.Dock = DockStyle.Fill;
@@ -214,7 +206,7 @@ internal sealed class MainForm : Form
             var previous = microphones.FirstOrDefault(item => item.Id == previousId);
             if (previous is not null) microphonePicker.SelectedItem = previous;
         }
-        catch (Exception ex) { statusLabel.Text = $"无法读取麦克风：{ex.Message}。仍可仅录 App 音频。"; }
+        catch (Exception ex) { statusLabel.Text = $"无法读取麦克风：{ex.Message}"; }
         UpdateSourceControls();
     }
 
@@ -243,8 +235,8 @@ internal sealed class MainForm : Form
         }
 
         statusLabel.Text = applications.Count == 0
-            ? "没有发现可录音的软件，请先打开直播软件后再刷新。"
-            : "请选择正在播放直播的软件。";
+            ? "未发现 App，请打开后刷新。"
+            : "请选择录音来源。";
     }
 
     private async Task ToggleRecordingAsync()
@@ -337,14 +329,14 @@ internal sealed class MainForm : Form
         try
         {
             lastRecordingPath = await recordingService.StopAsync();
-            statusLabel.Text = "录音已保存，可以直接用于转写和知识库总结。";
+            statusLabel.Text = "录音已保存。";
             revealButton.Visible = true;
         }
         catch (Exception ex)
         {
             lastRecordingPath = recordingService.RecoverablePath;
             revealButton.Visible = lastRecordingPath is not null;
-            ShowError($"停止录音时出现问题：{ex.Message}");
+            ShowError(ex.Message);
         }
         finally
         {
@@ -401,7 +393,7 @@ internal sealed class MainForm : Form
 
     private async void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        // Do not dispose this form while a start or save continuation is pending.
+        // Pending start/save continuations still need this form's controls.
         if (busy)
         {
             e.Cancel = true;

@@ -63,10 +63,12 @@ final class RecorderViewModel: ObservableObject {
         }
     }
 
+    var canEditSettings: Bool { !isLoading && !isRecording }
+
     var canStart: Bool {
         let appReady = !applicationEnabled || applications.contains { $0.id == selectedApplicationID }
         let micReady = !microphoneEnabled || microphones.contains { $0.id == selectedMicrophoneID }
-        return (applicationEnabled || microphoneEnabled) && appReady && micReady && !isLoading && !isRecording
+        return (applicationEnabled || microphoneEnabled) && appReady && micReady && canEditSettings
     }
 
     var elapsedText: String {
@@ -91,8 +93,8 @@ final class RecorderViewModel: ObservableObject {
         loadMicrophones()
         if applicationEnabled && CGPreflightScreenCaptureAccess() { await loadApplications() }
         else if applicationEnabled {
-            status = "录 App 音频请点击刷新并授权；仅录麦克风可关闭 App 音频，无需屏幕录制权限。"
-        } else { status = "请选择麦克风，并点击开始录音。" }
+            status = "点击“刷新”并允许屏幕录制，以读取 App 列表。"
+        } else { status = "请选择麦克风。" }
     }
 
     func loadMicrophones() {
@@ -111,9 +113,9 @@ final class RecorderViewModel: ObservableObject {
     }
 
     func loadApplications() async {
-        guard !isRecording, !isLoading, applicationEnabled else { return }
+        guard canEditSettings, applicationEnabled else { return }
         isLoading = true
-        status = "正在读取可录音的软件…"
+        status = "正在读取 App 列表…"
         defer { isLoading = false }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -127,16 +129,16 @@ final class RecorderViewModel: ObservableObject {
                 selectedApplicationID = applications.first?.id ?? ""
             }
             status = applications.isEmpty
-                ? "请先打开要录音的软件后再刷新；也可以关闭 App 音频，仅录麦克风。"
-                : "选择音频源与输出格式后即可开始录音。"
+                ? "未发现 App，请打开后刷新。"
+                : "请选择录音来源。"
         } catch {
-            status = "无法读取 App 列表。请在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许本应用。仅录麦克风时可关闭 App 音频。详情：\(error.localizedDescription)"
+            status = "无法读取 App 列表：\(error.localizedDescription)。请在系统设置中允许屏幕录制。"
         }
     }
 
     func sourcesChanged() {
         status = (applicationEnabled || microphoneEnabled)
-            ? "已选择：\(sourceDescription)。"
+            ? "录音来源：\(sourceDescription)"
             : "请至少开启 App 音频或麦克风中的一项。"
         loadMicrophones()
     }
@@ -153,7 +155,7 @@ final class RecorderViewModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             outputDirectory = url
             UserDefaults.standard.set(url.path, forKey: "outputDirectory")
-            status = "录音将保存到所选文件夹。"
+            status = "保存位置已更新。"
         }
     }
 
@@ -212,8 +214,7 @@ final class RecorderViewModel: ObservableObject {
     }
 
     private func stopRecording() async {
-        // A failure callback or Quit may arrive while a save is already running.
-        // Join that save instead of starting another one or terminating early.
+        // Quit and capture errors must wait for an in-flight save.
         if let stopTask { await stopTask.value; return }
         guard isRecording else { return }
         let task = Task { @MainActor [self] in await finishRecording() }
@@ -231,7 +232,7 @@ final class RecorderViewModel: ObservableObject {
             try await recorder.stop()
             status = "录音已保存。"
         } catch {
-            status = "录音已停止：\(error.localizedDescription)。已写入的文件保留在所选目录。"
+            status = "录音已停止：\(error.localizedDescription)"
         }
         isRecording = false
         startedAt = nil

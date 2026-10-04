@@ -10,7 +10,7 @@ enum RecorderError: LocalizedError {
         case .noDisplay: return "没有找到可用于建立 App 音频捕获的显示器。"
         case .alreadyRecording: return "已经有一项录音正在进行。"
         case .noSource: return "请至少开启 App 音频或麦克风中的一项。"
-        case .microphoneDenied: return "麦克风权限未获允许，请在系统设置 → 隐私与安全性 → 麦克风中允许 NRadio 直播录音。"
+        case .microphoneDenied: return "麦克风权限未开启，请在系统设置中允许访问麦克风。"
         case .microphoneUnavailable: return "无法使用所选麦克风，请确认设备仍连接。"
         case .noAudioReceived: return "没有收到音频，请确认所选音频源正在工作。"
         }

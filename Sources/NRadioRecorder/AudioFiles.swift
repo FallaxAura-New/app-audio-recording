@@ -4,7 +4,7 @@ import Foundation
 enum RecordingFormat: String, CaseIterable, Identifiable {
     case wav, mp3
     var id: String { rawValue }
-    var label: String { self == .wav ? "WAV · 无损音频" : "MP3 · 小体积" }
+    var label: String { rawValue.uppercased() }
 }
 
 enum AudioFileError: LocalizedError {
@@ -15,14 +15,13 @@ enum AudioFileError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .encoderUnavailable: return "MP3 编码器不可用。请使用完整的应用包，或在开发环境安装 LAME。"
-        case .encodingFailed(let code): return "MP3 编码失败（\(code)），已写入的录音仍保留。"
+        case .encodingFailed(let code): return "MP3 编码失败（\(code)）。"
         case .invalidPCM: return "音频数据格式无效。"
         }
     }
 }
 
-/// Reserves a ds64-sized JUNK chunk so long WAV recordings can become RF64
-/// without moving the already-written audio.
+// Reserve ds64 space so RF64 does not require rewriting audio data.
 enum WaveHeader {
     static let size = 80
     static func data(audioBytes: UInt64, sampleRate: UInt32 = 48_000, channels: UInt16 = 2) -> Data {
@@ -97,8 +96,6 @@ private final class LameLibrary {
     deinit { dlclose(handle) }
 }
 
-/// Writes one mixed stereo stream. WAV headers and both formats' audio are
-/// flushed every second; MP3 is encoded while recording rather than at Stop.
 final class AudioFileWriter {
     let format: RecordingFormat
     private let file: FileHandle
@@ -127,7 +124,6 @@ final class AudioFileWriter {
             library = loaded
             initializedEncoder = state
         }
-        // Exclusive creation prevents a same-name recording from being overwritten.
         let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard fd >= 0 else {
             if let state = initializedEncoder, let loaded = library { _ = loaded.close(state) }

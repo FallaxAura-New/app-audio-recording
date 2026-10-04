@@ -34,7 +34,7 @@ internal sealed class RecordingService : IAsyncDisposable
         if (IsRecording) throw new InvalidOperationException("已经有一项录音正在进行。");
         if (processId is null && microphoneId is null) throw new InvalidOperationException("请至少开启一个音频源。");
         if (processId is not null && !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 20348))
-            throw new NotSupportedException("录制指定 App 需要 Windows build 20348 或更高版本（建议 Windows 11）；仍可关闭 App 音频，仅录麦克风。");
+            throw new NotSupportedException("App 录音需要 Windows build 20348 或更高版本；可改为仅录麦克风。");
         if (File.Exists(targetOutputPath)) throw new IOException("输出文件已存在，请更换文件名。");
         Directory.CreateDirectory(Path.GetDirectoryName(targetOutputPath)!);
         format = outputFormat;
@@ -81,7 +81,6 @@ internal sealed class RecordingService : IAsyncDisposable
         {
             try { await CleanupAsync(); }
             catch (Exception cleanupError) { throw new AggregateException(startupError, cleanupError); }
-            // Preserve recordings and the original failure even if cleanup failed.
             throw;
         }
     }
@@ -113,7 +112,7 @@ internal sealed class RecordingService : IAsyncDisposable
         {
             lock (audioLock)
             {
-                if (!stopping) Fail(args.Exception ?? new InvalidOperationException("音频源已断开，录音已停止。"));
+                if (!stopping) Fail(args.Exception ?? new InvalidOperationException("音频源已断开。"));
                 else terminalError ??= args.Exception;
             }
             completion.TrySetResult();
@@ -201,8 +200,7 @@ internal sealed class RecordingService : IAsyncDisposable
                     MediaFoundationEncoder.EncodeToMp3(reader, destination, 192_000);
                     destination.Flush(flushToDisk: true);
                 });
-                // MP3 is complete at this point. A locked recovery file should
-                // not turn a successful recording into a reported save failure.
+                // A failed WAV cleanup does not invalidate the completed MP3.
                 try { File.Delete(sourcePath); }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
@@ -217,7 +215,7 @@ internal sealed class RecordingService : IAsyncDisposable
             var preserved = RecoverablePath is not null && File.Exists(RecoverablePath)
                 ? $"已写入的文件保留在：{RecoverablePath}"
                 : "请检查所选保存目录";
-            throw new InvalidOperationException($"录音停止或保存时出现问题：{failure.Message}。{preserved}", failure);
+            throw new InvalidOperationException($"停止录音失败：{failure.Message}。{preserved}", failure);
         }
         return finalPath;
     }

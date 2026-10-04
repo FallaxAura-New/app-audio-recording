@@ -2,7 +2,7 @@ using NAudio.Wave;
 
 namespace NRadioRecorder.Windows;
 
-/// Reads our fixed 80-byte WAV/RF64 header without a 32-bit RIFF size limit.
+/// PCM reader for the recorder's 80-byte WAV/RF64 header.
 internal sealed class PcmRecordingReader : WaveStream
 {
     private readonly FileStream file;

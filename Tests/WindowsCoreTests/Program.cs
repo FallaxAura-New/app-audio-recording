@@ -9,8 +9,7 @@ static void Check(bool condition, string message)
 
 static byte[] ReadRecordingSnapshot(string path)
 {
-    // Windows checks sharing in both directions. This reader must permit the
-    // writer's existing write access; the writer still denies other writers.
+    // Windows sharing checks must also permit the active writer.
     using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
     var bytes = new byte[checked((int)stream.Length)];
     stream.ReadExactly(bytes);

@@ -8,13 +8,12 @@ enum AudioMixerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidBuffer: return "收到的音频不是有效的双声道 PCM。"
-        case .timingOverflow: return "音频时间戳超出混音缓冲范围，录音已安全停止。"
+        case .timingOverflow: return "音频时间戳超出缓冲范围。"
         }
     }
 }
 
-/// Timestamp-aligned bounded ring buffer. Missing source packets become silence,
-/// so one silent source never shortens or stalls the other source's recording.
+// Missing packets become silence to preserve the recording timeline.
 final class AudioMixer {
     static let sampleRate = 48_000
     private let capacityFrames: Int
@@ -34,8 +33,7 @@ final class AudioMixer {
         guard samples.count.isMultiple(of: 2) else { throw AudioMixerError.invalidBuffer }
         let frames = samples.count / 2
         var start = timestampFrame
-        // Resampling can change packet length by a few frames; avoid tiny
-        // discontinuities while preserving meaningful pauses.
+        // Snap resampling jitter of up to 2 ms to the previous packet.
         if let previous = sourceEnds[source], abs(previous - start) <= 96 { start = previous }
         guard start < outputFrame + Int64(capacityFrames),
               start + Int64(frames) <= outputFrame + Int64(capacityFrames) else {

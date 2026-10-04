@@ -27,7 +27,7 @@ internal sealed class AudioMixer
         var start = timestampFrame;
         if (sourceEnds.TryGetValue(source, out var previous) && Math.Abs(previous - start) <= 96) start = previous;
         if (start >= OutputFrame + capacityFrames || start + frames > OutputFrame + capacityFrames)
-            throw new InvalidOperationException("音频时间戳超出混音缓冲范围，录音已停止。");
+            throw new InvalidOperationException("音频时间戳超出缓冲范围。");
         sourceEnds[source] = start + frames;
         ReceivedFrames += frames;
         for (var frame = 0; frame < frames; frame++)

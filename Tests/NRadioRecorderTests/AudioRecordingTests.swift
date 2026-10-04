@@ -185,7 +185,6 @@ final class AudioRecordingTests: XCTestCase {
     }
 }
 
-/// Simulates a pending save without accessing microphone or screen permissions.
 private final class DeferredRecorder: AudioRecording, @unchecked Sendable {
     var onFailure: (@Sendable (Error) -> Void)?
     private let lock = NSLock()
